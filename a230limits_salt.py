@@ -238,6 +238,9 @@ def findFlux(flux, s, f, i, point):
 		# Assuming shakedown has occured (membrane stress remains):
 		sigmaEqMax = np.interp(np.average(s.T[0,:]), f[:,0], f[:,i])
 		return sigmaEqMax - np.average(s.sigmaEq[0,:])
+	elif point=='corrosion':
+		# T_i:
+		return 903.15 - s.T[0,0]
 	else: sys.exit('Variable point {} not recognised'.format(point))
 
 ##################################### MAIN #####################################
@@ -248,15 +251,19 @@ if __name__ == "__main__":
 	iterator='inline'
 	nr=6; nt=61
 
-	T_int = np.linspace(290, 565, 12)+273.15
+	T_int = np.linspace(290, 600, 12)+273.15
 
 	""" Looping velocities"""
-	for OD,WT in zip([33.4, 42.16, 48.26, 60.33, 73.03],[1.2, 1.2, 1.2, 1.2, 1.2]):
+	for OD,WT in zip([45],[1.2]):
 		""" Instantiating figure and subplots"""
 		fig = plt.figure(figsize=(3.5, 3.5))
 		ax = fig.add_subplot(111)
 		csv = np.c_[T_int,]
+		csvS = np.c_[T_int,]
+		csvT = np.c_[T_int,]
 		header = 'T_int(K)'
+		headerS = '0'
+		headerT = '0'
 
 		b = OD/2e3		 # outside tube radius [mm->m]
 		a = (b-WT*1e-3)	 # inside tube radius [mm->m]
@@ -266,7 +273,7 @@ if __name__ == "__main__":
 		for vf in [1., 2., 3., 4.]:
 			for mat in ['N06230_f-values.dat']:
 				k = 16.57; alpha=15.6e-6; E = 186e9; nu = 0.31
-				s = nts.Solver(g, debug=False, CG=0.85e6, k=k, T_int=723.15, R_f=0,
+				s = nts.Solver(g, debug=False, CG=0.85e6, k=k, T_int=723.15, R_f=8.808e-5,
 								A=0.968, epsilon=0.87, T_ext=293.15, h_ext=h_ext,
 								P_i=0e5, alpha=alpha, E=E, nu=nu, n=1,
 								bend=False)
@@ -278,16 +285,24 @@ if __name__ == "__main__":
 				fv[:,4] *= 3e6 # apply 3f criteria to Sm and convert MPa->Pa
 				TSod_met = np.zeros(len(T_int))
 				fluxSalt = np.zeros(len(T_int))
+				fluxSaltT = np.zeros(len(T_int))
+				fluxSaltS = np.zeros(len(T_int))
 				t = time.perf_counter()
 				for i in range(len(T_int)):
 					s.T_int = T_int[i]
 					salt.update(T_int[i])
 					s.h_int, dP = coolant.HTC(False, salt, a, b, 20, 'Dittus', 'velocity', vf)
-					fluxSalt[i] = opt.newton(
+					fluxSaltT[i] = opt.newton(
+						findFlux, 1e5,
+						args=(s, fv, 4, 'corrosion'),
+						maxiter=1000, tol=1e-2
+					)
+					fluxSaltS[i] = opt.newton(
 						findFlux, 1e5,
 						args=(s, fv, 4, 'outside'),
 						maxiter=1000, tol=1e-2
 					)
+					fluxSalt[i]=min(fluxSaltT[i],fluxSaltS[i])
 					TSod_met[i] = np.max(s.T)
 				valprint('Time taken', time.perf_counter() - t, 'sec')
 
@@ -307,6 +322,16 @@ if __name__ == "__main__":
 				## Dump peak flux results to CSV file:
 				csv = np.c_[csv,TSod_met, fluxSalt,]
 				header += ',TSod_metal_u{0}(K),fluxSalt_u{1}(W/(m^2.K))'.format(vf,vf)
+				csvS = np.c_[csvS, fluxSaltS,]
+				headerS += ',{0}'.format(vf)
+				csvT = np.c_[csvT, fluxSaltT,]
+				headerT += ',{0}'.format(vf)
 		np.savetxt('{0}_OD{1:.2f}_WT{2:.2f}_peakFlux.csv'.format(fname, OD, WT),
 					csv, delimiter=',', header=header
+		)
+		np.savetxt('{0}_OD{1:.2f}_WT{2:.2f}_peakFluxS.csv'.format(fname, OD, WT),
+					csvS, delimiter=',', header=headerS
+		)
+		np.savetxt('{0}_OD{1:.2f}_WT{2:.2f}_peakFluxT.csv'.format(fname, OD, WT),
+					csvT, delimiter=',', header=headerT
 		)
