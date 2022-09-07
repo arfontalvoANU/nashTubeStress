@@ -35,6 +35,9 @@ Q_ = UR_.Quantity
 
 import nashTubeStress as nts
 import coolant
+import warnings
+warnings.filterwarnings('ignore')
+from tqdm import tqdm
 
 ################################### PLOTTING ###################################
 
@@ -240,71 +243,69 @@ def findFlux(flux, s, f, i, point):
 		return sigmaEqMax - np.average(s.sigmaEq[0,:])
 	elif point=='corrosion':
 		# T_i:
-		return 903.15 - s.T[0,0]
+		return 630 + 273.15 - s.T[0,0]
 	else: sys.exit('Variable point {} not recognised'.format(point))
 
 ##################################### MAIN #####################################
 
 if __name__ == "__main__":
-	h_ext=30 # convective loss due to wind W/(m2.K)
-	salt = coolant.nitrateSalt(True); salt.update(723.15)
+	h_ext=10. # convective loss due to wind W/(m2.K)
+	salt = coolant.nitrateSalt(False); salt.update(723.15)
 	iterator='inline'
 	nr=6; nt=61
 
-	T_int = np.linspace(290, 600, 12)+273.15
+	T_int = np.linspace(290, 565, 12)
+	T_int = np.append(T_int,600) + 273.15
 
 	""" Looping velocities"""
-	for OD,WT in zip([45],[1.2]):
+	for OD,WT in zip([45],[1.5]):
 		""" Instantiating figure and subplots"""
 		fig = plt.figure(figsize=(3.5, 3.5))
 		ax = fig.add_subplot(111)
 		csv = np.c_[T_int,]
-		csvS = np.c_[T_int,]
-		csvT = np.c_[T_int,]
-		header = 'T_int(K)'
-		headerS = '0'
-		headerT = '0'
+		header  = '0'
 
 		b = OD/2e3		 # outside tube radius [mm->m]
 		a = (b-WT*1e-3)	 # inside tube radius [mm->m]
 		g = nts.Grid(nr=nr, nt=nt, rMin=a, rMax=b) # nr, nt -> resolution
+		vfs = np.array([0, 0.25, 0.5, 0.75, 1., 2., 3., 4.])
 
-		fname = 'N06230'
-		for vf in [1., 2., 3., 4.]:
-			for mat in ['N06230_f-values.dat']:
-				k = 16.57; alpha=15.6e-6; E = 186e9; nu = 0.31
+		fname = 'N08810'
+		for vf in vfs[1:]:
+			for mat in ['800H']:
+				props = np.genfromtxt(os.path.join('mats/props', mat), delimiter=';')
+				props[:,0] += 273.15 # degC to K
+				props[:,1] *= 1e9  # convert GPa -> Pa
+				props[:,3] *= 1e-6 # convert 1e-6 mm/mm -> mm/mm
+				E     = np.interp(723.15,props[:,0],props[:,1])
+				k     = np.interp(723.15,props[:,0],props[:,2])
+				alpha = np.interp(723.15,props[:,0],props[:,3])
+				nu = 0.31
 				s = nts.Solver(g, debug=False, CG=0.85e6, k=k, T_int=723.15, R_f=8.808e-5,
 								A=0.968, epsilon=0.87, T_ext=293.15, h_ext=h_ext,
 								P_i=0e5, alpha=alpha, E=E, nu=nu, n=1,
 								bend=False)
 				s.extBC = s.extTubeHalfCosFluxRadConv
 				s.intBC = s.intTubeConv
-				salt.debug = False
-				fv = np.genfromtxt(os.path.join('mats', mat), delimiter=',')
+				fv = np.genfromtxt(os.path.join('mats', mat), delimiter=';')
 				fv[:,0] += 273.15 # degC to K
-				fv[:,4] *= 3e6 # apply 3f criteria to Sm and convert MPa->Pa
+				fv[:,2] *= 3e6 # apply 3f criteria to Sm and convert MPa->Pa
 				TSod_met = np.zeros(len(T_int))
 				fluxSalt = np.zeros(len(T_int))
-				fluxSaltT = np.zeros(len(T_int))
-				fluxSaltS = np.zeros(len(T_int))
-				t = time.perf_counter()
-				for i in range(len(T_int)):
+				print('vf: {0:.2f} m/s'.format(vf))
+				for i in tqdm(range(len(T_int))):
+					s.E =     np.interp(T_int[i],props[:,0],props[:,1])
+					s.k =     np.interp(T_int[i],props[:,0],props[:,2])
+					s.alpha = np.interp(T_int[i],props[:,0],props[:,3])
 					s.T_int = T_int[i]
 					salt.update(T_int[i])
-					s.h_int, dP = coolant.HTC(False, salt, a, b, 20, 'Dittus', 'velocity', vf)
-					fluxSaltT[i] = opt.newton(
+					s.h_int, dP = coolant.HTC(False, salt, a, b, s.k, 'Gnielinski', 'velocity', vf)
+					fluxSalt[i] = opt.newton(
 						findFlux, 1e5,
-						args=(s, fv, 4, 'corrosion'),
+						args=(s, fv, 2, 'outside'),
 						maxiter=1000, tol=1e-2
 					)
-					fluxSaltS[i] = opt.newton(
-						findFlux, 1e5,
-						args=(s, fv, 4, 'outside'),
-						maxiter=1000, tol=1e-2
-					)
-					fluxSalt[i]=min(fluxSaltT[i],fluxSaltS[i])
 					TSod_met[i] = np.max(s.T)
-				valprint('Time taken', time.perf_counter() - t, 'sec')
 
 				ax.plot(T_int-273.15,fluxSalt*1e-6, label=r'U = {0} m/s'.format(vf))
 				ax.set_xlabel(r'\textsc{fluid temperature}, '+\
@@ -313,25 +314,13 @@ if __name__ == "__main__":
 					r'\textsc{incident flux}, $\vec{\phi_\mathrm{q}}$ '+\
 					'(\si{\mega\watt\per\meter\squared})'
 				)
-				#ax.set_ylim(0.2, 1.6)
 				ax.legend(loc='best')
 				fig.tight_layout()
 				fig.savefig('{0}_OD{1:.2f}_WT{2:.2f}_peakFlux.pdf'.format(fname, OD, WT),
 							transparent=True)
 				plt.close(fig)
 				## Dump peak flux results to CSV file:
-				csv = np.c_[csv,TSod_met, fluxSalt,]
-				header += ',TSod_metal_u{0}(K),fluxSalt_u{1}(W/(m^2.K))'.format(vf,vf)
-				csvS = np.c_[csvS, fluxSaltS,]
-				headerS += ',{0}'.format(vf)
-				csvT = np.c_[csvT, fluxSaltT,]
-				headerT += ',{0}'.format(vf)
-		np.savetxt('{0}_OD{1:.2f}_WT{2:.2f}_peakFlux.csv'.format(fname, OD, WT),
-					csv, delimiter=',', header=header
-		)
-		np.savetxt('{0}_OD{1:.2f}_WT{2:.2f}_peakFluxS.csv'.format(fname, OD, WT),
-					csvS, delimiter=',', header=headerS
-		)
-		np.savetxt('{0}_OD{1:.2f}_WT{2:.2f}_peakFluxT.csv'.format(fname, OD, WT),
-					csvT, delimiter=',', header=headerT
-		)
+				csv  = np.c_[csv, fluxSalt,]
+
+		csv = np.concatenate((vfs.reshape(1,len(vfs)),csv))
+		np.savetxt('{0}_OD{1:.2f}_WT{2:.2f}_peakFlux.csv'.format(fname, OD, WT), csv, delimiter=',')
